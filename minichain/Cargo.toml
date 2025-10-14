@@ -1,5 +1,5 @@
 [package]
-name = "node"
+name = "minichain"
 version = "0.1.0"
 edition = "2024"
 
@@ -8,3 +8,4 @@ tokio = { version = "1", features = ["full"] }
 jsonrpsee = { version = "=0.24.9", features = ["macros", "server","client"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
+dotenvy = "0.15.7"
