@@ -1,7 +1,8 @@
 mod node;
 pub(crate) mod txs;
 
-use std::env;
+//use crate::txs;
+use std::{env, net::SocketAddr};
 
 pub struct Config {
     pub bootnode: String,
@@ -16,5 +17,11 @@ pub fn load_config() -> Config {
 
 pub fn run() {
     let cfg = load_config();
-    node::NodeManager::new(&cfg.bootnode.parse().expect("Invalid socket address"));
+    let user_map = txs::UserMap::new();
+
+    node::NodeManager::new(cfg.bootnode.parse().expect("Invalid socket address"));
+}
+
+fn launch_node_manager(boot_ip: SocketAddr, user: txs::User) {
+    node::Node::new(&user, boot_ip);
 }

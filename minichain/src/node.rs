@@ -1,23 +1,31 @@
-use dotenvy::dotenv;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use crate::txs::User;
-struct Node<'a> {
+pub struct Node<'a> {
     owner: &'a User,
     address: SocketAddr,
 }
 
 pub struct NodeManager<'a> {
-    map: HashMap<&'a String, &'a Node<'a>>,
-    active: &'a SocketAddr,
+    map: HashMap<SocketAddr, Node<'a>>,
+    active: SocketAddr,
 }
 
+impl<'a> Node<'a> {
+    pub fn new(owner: &'a User, address: SocketAddr) -> Self {
+        Node { owner, address }
+    }
+}
 impl<'a> NodeManager<'a> {
-    pub fn new(active: &'a SocketAddr) -> Self {
+    pub fn new(active: Node<'a>) -> Self {
+        let addr = active.address;
+        let mut map: HashMap<SocketAddr, Node> = HashMap::new();
+        map.insert(active.address, active);
+
         NodeManager {
-            map: (HashMap::new()),
-            active,
+            map: map,
+            active: addr,
         }
     }
 }
