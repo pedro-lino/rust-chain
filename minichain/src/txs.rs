@@ -5,48 +5,29 @@ use std::fmt::Write;
 use anyhow::{Result, bail, ensure};
 use rand::{RngCore, rng};
 
-const ADMN_ADDR: &str = "0x4b6e99d0d66b1caa1f0377fbb7a97c12ecb3b457";
+type Address = String;
 pub struct User {
-    address: String,
+    address: Address,
     balance: u128,
 }
 pub struct UserMap {
-    map: HashMap<String, User>,
+    map: HashMap<Address, User>,
 }
 
-struct Transaction<'a> {
+struct Transaction {
     data: Box<[u8]>,
-    sender: &'a str,
+    sender: Address,
 }
 
-struct Block<'a> {
+struct Block {
     number: u128,
     timestamp: i64,
-    txs: Vec<Transaction<'a>>,
+    txs: Vec<Transaction>,
 }
 
-impl UserMap {
-    pub fn new() -> Self {
-        let map: HashMap<String, User> = HashMap::new();
-        let admin = User {
-            address: ADMN_ADDR.to_string(),
-            balance: 9999999,
-        };
-
-        let user_map = UserMap { map };
-        user_map.add_user(admin).unwrap();
-        user_map
-    }
-
-    fn add_user(&mut self, usr: User) -> anyhow::Result<_> {
-        match self.map.entry(usr.address.clone()) {
-            Entry::Vacant(v) => {
-                v.insert(usr);
-                Ok(())
-            }
-            Entry::Occupied(..) => bail!("User was already registered"),
-        }
-    }
+pub struct Mempool {
+    txs: Vec<(Transaction, u128)>,
+    miner: String,
 }
 
 impl User {
@@ -57,25 +38,19 @@ impl User {
             balance: 0,
         }
     }
-}
 
-struct Mempool<'a> {
-    txs: Vec<(Transaction<'a>, u128)>,
-}
-
-impl<'a> Mempool<'a> {
-    fn new(&mut self, sender: &'a mut User, gas: u128, data: Box<[u8]>) -> Result<()> {
+    fn send_tx<'a>(&mut self, data: Box<[u8]>, gas: u128, mempool: &'a mut Mempool) -> Result<()> {
         ensure!(
-            sender.balance >= gas,
+            self.balance >= gas,
             "Sender doesn't have enough funds to pay for gas."
         );
 
-        sender.balance -= gas;
+        self.balance -= gas;
 
-        self.txs.push((
+        mempool.txs.push((
             Transaction {
                 data,
-                sender: &sender.address,
+                sender: self.address.clone(),
             },
             gas,
         ));
@@ -83,7 +58,45 @@ impl<'a> Mempool<'a> {
     }
 }
 
-pub fn random_address() -> String {
+impl UserMap {
+    pub fn new(admin_addr: &String) -> Self {
+        let map: HashMap<String, User> = HashMap::new();
+        let admin = User {
+            address: admin_addr.clone(),
+            balance: 9999999,
+        };
+
+        let mut user_map = UserMap { map };
+        user_map.add_user(admin).unwrap();
+        user_map
+    }
+
+    fn add_user(&mut self, usr: User) -> Result<()> {
+        match self.map.entry(usr.address.clone()) {
+            Entry::Vacant(v) => {
+                v.insert(usr);
+                Ok(())
+            }
+            Entry::Occupied(..) => bail!("User was already registered"),
+        }
+    }
+
+    pub fn get_user(&self, addr: &String) -> Option<&User> {
+        self.map.get(addr)
+    }
+}
+
+impl Mempool {
+    pub fn new(admin_addr: &Address) -> Self {
+        let mut txs: Vec<(Transaction, u128)> = Vec::new();
+        Mempool {
+            txs,
+            miner: admin_addr.clone(),
+        }
+    }
+}
+
+pub fn random_address() -> Address {
     let mut bytes = [0u8; 20];
     rng().fill_bytes(&mut bytes);
     let mut s = String::with_capacity(2 + bytes.len() * 2);
