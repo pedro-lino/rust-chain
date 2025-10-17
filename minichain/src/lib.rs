@@ -1,7 +1,5 @@
 mod node;
-pub(crate) mod txs;
 
-//use crate::txs;
 use std::{env, net::SocketAddr};
 
 pub struct Config {
@@ -27,7 +25,8 @@ pub fn load_config() -> Config {
 
 pub fn run() {
     let cfg = load_config();
-    let user_map = txs::UserMap::new(&cfg.admin_addr);
+    let user_map = node::UserMap::new(&cfg.admin_addr);
     let node_manager = node::NodeManager::new(&cfg, &user_map);
-    let mempool = txs::Mempool::new(&cfg.admin_addr);
+    let mempool = node::Mempool::new(&cfg.admin_addr);
+    let blockchain = node::Blockchain::new();
 }
