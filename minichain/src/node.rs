@@ -17,7 +17,8 @@ pub struct User {
     balance: u128,
 }
 pub struct UserMap {
-    map: HashMap<Address, User>,
+    users: HashMap<Address, User>,
+    admins: HashMap<Address, bool>,
 }
 
 pub struct Node<'a> {
@@ -60,6 +61,20 @@ impl User {
         }
     }
 
+    fn fund_user(
+        &self,
+        user_map: &mut UserMap,
+        usr: &mut User,
+        amount: u128,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(user_map.is_admin(&self.address), "Funder is not an admin.");
+        if let Some(u) = user_map.users.get_mut(&usr.address) {
+            u.balance += amount;
+            Ok(())
+        } else {
+            anyhow::bail!("Couldn't fund, because user was not registered.")
+        }
+    }
     fn send_tx<'a>(&mut self, data: Box<[u8]>, gas: u128, mempool: &'a mut Mempool) -> Result<()> {
         ensure!(
             self.balance >= gas,
@@ -80,19 +95,22 @@ impl User {
 
 impl UserMap {
     pub fn new(admin_addr: &String) -> Self {
-        let map: HashMap<String, User> = HashMap::new();
+        let users: HashMap<Address, User> = HashMap::new();
+        let admins: HashMap<Address, bool> = HashMap::new();
+
         let admin = User {
             address: admin_addr.clone(),
             balance: 9999999,
         };
 
-        let mut user_map = UserMap { map };
+        let mut user_map = UserMap { users, admins };
         user_map.add_user(admin).unwrap();
-        user_map
+        user_map.set_admin(admin_addr, true);
+        return user_map;
     }
 
     fn add_user(&mut self, usr: User) -> Result<()> {
-        match self.map.entry(usr.address.clone()) {
+        match self.users.entry(usr.address.clone()) {
             Entry::Vacant(v) => {
                 v.insert(usr);
                 Ok(())
@@ -101,8 +119,15 @@ impl UserMap {
         }
     }
 
+    fn set_admin(&mut self, addr: &Address, is_admin: bool) {
+        self.admins.insert(addr.clone(), is_admin);
+    }
+
     pub fn get_user(&self, addr: &String) -> Option<&User> {
-        self.map.get(addr)
+        self.users.get(addr)
+    }
+    pub fn is_admin(&self, addr: &String) -> bool {
+        self.admins.contains_key(addr)
     }
 }
 
@@ -111,7 +136,7 @@ impl<'a> Node<'a> {
         Node { owner, address }
     }
 
-    fn execute_txs(&self, mempool: &mut Mempool, chain: &mut Blockchain) -> anyhow::Result<()> {
+    pub fn execute_txs(&self, mempool: &mut Mempool, chain: &mut Blockchain) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.owner.address == mempool.miner,
             "Current node was not elected to execute mempool txs."
@@ -141,6 +166,10 @@ impl<'a> NodeManager<'a> {
         map.insert(cfg.boot_addr, bootnode);
 
         NodeManager { map: map }
+    }
+
+    pub fn get_node(&self, ip: SocketAddr) -> Option<&Node> {
+        self.map.get(&ip)
     }
 }
 
