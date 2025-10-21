@@ -4,7 +4,7 @@ use minichain::run;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    run();
+    run().await?;
 
     let ctx = ();
 
@@ -24,6 +24,4 @@ async fn main() -> Result<()> {
     println!("JSON-RPC on http://127.0.0.1:8080");
     handle.stopped().await;
     Ok(())
-
-    
 }

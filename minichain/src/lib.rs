@@ -1,8 +1,10 @@
 mod node;
 
-use std::{env, net::SocketAddr};
-
 use anyhow::anyhow;
+use std::{env, net::SocketAddr, sync::Arc};
+use tokio::sync::Mutex;
+
+use crate::node::User;
 
 pub struct Config {
     pub boot_addr: SocketAddr,
@@ -25,19 +27,36 @@ pub fn load_config() -> Config {
     }
 }
 
-pub fn run() -> anyhow::Result<()> {
+pub async fn run() -> anyhow::Result<()> {
     let cfg = load_config();
-    let user_map = node::UserMap::new(&cfg.admin_addr);
-    let node_manager = node::NodeManager::new(&cfg, &user_map);
+    let node_manager: node::NodeManager;
+    node_manager = node::NodeManager::new(&cfg);
     let mempool = node::Mempool::new(&cfg.admin_addr);
     let blockchain = node::Blockchain::new();
 
-    let admin = user_map
-        .get_user(&cfg.admin_addr)
-        .ok_or_else(|| anyhow!("User {} not found", &cfg.admin_addr))?;
     let bootnode = node_manager
         .get_node(cfg.boot_addr)
         .ok_or_else(|| anyhow!("Node {} not found", &cfg.boot_addr))?;
+
+    let usr1 = User::new();
+    let addr1 = usr1.address.clone();
+
+    let map_mutex = Arc::new(Mutex::new(node::UserMap::new(&cfg.admin_addr)));
+    let mut usr_map = map_mutex.lock().await;
+
+    usr_map.add_user(usr1)?;
+
+    println!(
+        "user balance is {}",
+        usr_map.get_user(&addr1).unwrap().balance
+    );
+
+    usr_map.fund_user(&cfg.admin_addr, &addr1, 99999)?;
+
+    println!(
+        "user balance is {}",
+        usr_map.get_user(&addr1).unwrap().balance
+    );
 
     Ok(())
 }

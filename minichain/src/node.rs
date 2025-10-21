@@ -4,6 +4,7 @@ use rand::{RngCore, rng};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::fmt::Write;
 use std::net::SocketAddr;
@@ -13,21 +14,21 @@ type Address = String;
 type Hash = String;
 
 pub struct User {
-    address: Address,
-    balance: u128,
+    pub address: Address,
+    pub balance: u128,
 }
 pub struct UserMap {
     users: HashMap<Address, User>,
-    admins: HashMap<Address, bool>,
+    admins: HashSet<Address>,
 }
 
-pub struct Node<'a> {
-    owner: &'a User,
-    address: SocketAddr,
+pub struct Node {
+    owner_addr: Address,
+    ip_address: SocketAddr,
 }
 
-pub struct NodeManager<'a> {
-    map: HashMap<SocketAddr, Node<'a>>,
+pub struct NodeManager {
+    map: HashMap<SocketAddr, Node>,
 }
 
 struct Transaction {
@@ -61,20 +62,6 @@ impl User {
         }
     }
 
-    fn fund_user(
-        &self,
-        user_map: &mut UserMap,
-        usr: &mut User,
-        amount: u128,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(user_map.is_admin(&self.address), "Funder is not an admin.");
-        if let Some(u) = user_map.users.get_mut(&usr.address) {
-            u.balance += amount;
-            Ok(())
-        } else {
-            anyhow::bail!("Couldn't fund, because user was not registered.")
-        }
-    }
     fn send_tx<'a>(&mut self, data: Box<[u8]>, gas: u128, mempool: &'a mut Mempool) -> Result<()> {
         ensure!(
             self.balance >= gas,
@@ -96,7 +83,7 @@ impl User {
 impl UserMap {
     pub fn new(admin_addr: &String) -> Self {
         let users: HashMap<Address, User> = HashMap::new();
-        let admins: HashMap<Address, bool> = HashMap::new();
+        let admins: HashSet<Address> = HashSet::new();
 
         let admin = User {
             address: admin_addr.clone(),
@@ -109,7 +96,7 @@ impl UserMap {
         return user_map;
     }
 
-    fn add_user(&mut self, usr: User) -> Result<()> {
+    pub fn add_user(&mut self, usr: User) -> Result<()> {
         match self.users.entry(usr.address.clone()) {
             Entry::Vacant(v) => {
                 v.insert(usr);
@@ -120,25 +107,46 @@ impl UserMap {
     }
 
     fn set_admin(&mut self, addr: &Address, is_admin: bool) {
-        self.admins.insert(addr.clone(), is_admin);
+        if is_admin {
+            self.admins.insert(addr.clone());
+        } else {
+            self.admins.remove(addr);
+        }
     }
 
-    pub fn get_user(&self, addr: &String) -> Option<&User> {
+    pub fn get_user(&mut self, addr: &String) -> Option<&User> {
         self.users.get(addr)
     }
     pub fn is_admin(&self, addr: &String) -> bool {
-        self.admins.contains_key(addr)
+        self.admins.contains(addr)
+    }
+    pub fn fund_user(
+        &mut self,
+        funder: &Address,
+        funded: &Address,
+        amount: u128,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(self.is_admin(funder), "Funder is not an admin.");
+        if let Some(u) = self.users.get_mut(funded) {
+            u.balance += amount;
+            Ok(())
+        } else {
+            anyhow::bail!("Couldn't fund, because user was not registered.")
+        }
     }
 }
 
-impl<'a> Node<'a> {
-    fn new(owner: &'a User, address: SocketAddr) -> Self {
-        Node { owner, address }
+impl Node {
+    fn new(owner_addr: &Address, ip_address: SocketAddr) -> Self {
+        Node {
+            owner_addr: owner_addr.clone(),
+            ip_address,
+        }
     }
 
     pub fn execute_txs(&self, mempool: &mut Mempool, chain: &mut Blockchain) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.owner.address == mempool.miner,
+            self.owner_addr == mempool.miner,
             "Current node was not elected to execute mempool txs."
         );
 
@@ -155,12 +163,9 @@ impl<'a> Node<'a> {
         Ok(())
     }
 }
-impl<'a> NodeManager<'a> {
-    pub fn new(cfg: &Config, user_map: &'a UserMap) -> Self {
-        let admin = user_map
-            .get_user(&cfg.admin_addr)
-            .expect("Admin address was not properly registered.");
-        let bootnode = Node::new(admin, cfg.boot_addr);
+impl NodeManager {
+    pub fn new(cfg: &Config) -> Self {
+        let bootnode = Node::new(&cfg.admin_addr, cfg.boot_addr);
 
         let mut map: HashMap<SocketAddr, Node> = HashMap::new();
         map.insert(cfg.boot_addr, bootnode);
