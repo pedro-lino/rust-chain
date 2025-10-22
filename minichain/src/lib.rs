@@ -2,28 +2,35 @@ mod node;
 
 use anyhow::anyhow;
 use std::{env, net::SocketAddr, sync::Arc};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
+use tokio::task;
 
 use crate::node::User;
 
 pub struct Config {
     pub boot_addr: SocketAddr,
     pub admin_addr: String,
+    pub mempool_buf: usize,
 }
 
 pub fn load_config() -> Config {
     let _ = dotenvy::dotenv();
 
-    let bootnode_addr = env::var("BOOT_ADDR")
+    let boot_addr = env::var("BOOT_ADDR")
         .expect("BOOT_ADDR env not set.")
         .parse::<SocketAddr>()
         .expect("Invalid BOOTNODE address format");
 
     let admin_addr = env::var("ADMIN_ADDR").expect("ADMIN_ADDR env not set.");
+    let mempool_buf = env::var("MEMPOOL_BUF")
+        .expect("MEMPOOL_BUF env not set.")
+        .parse::<usize>()
+        .expect("Invalid BOOTNODE address format");
 
     Config {
-        boot_addr: bootnode_addr,
+        boot_addr,
         admin_addr,
+        mempool_buf,
     }
 }
 
@@ -31,32 +38,33 @@ pub async fn run() -> anyhow::Result<()> {
     let cfg = load_config();
     let node_manager: node::NodeManager;
     node_manager = node::NodeManager::new(&cfg);
-    let mempool = node::Mempool::new(&cfg.admin_addr);
     let blockchain = node::Blockchain::new();
+    let (tx_mp, rx_mp) = mpsc::channel(cfg.mempool_buf);
 
     let bootnode = node_manager
         .get_node(cfg.boot_addr)
-        .ok_or_else(|| anyhow!("Node {} not found", &cfg.boot_addr))?;
+        .ok_or_else(|| anyhow!("Node {} not found", cfg.boot_addr))?;
 
-    let usr1 = User::new();
-    let addr1 = usr1.address.clone();
+    let map_mutex = Arc::new(Mutex::new(node::UserMap::new()));
 
-    let map_mutex = Arc::new(Mutex::new(node::UserMap::new(&cfg.admin_addr)));
-    let mut usr_map = map_mutex.lock().await;
+    let mut users = map_mutex.lock().await;
 
-    usr_map.add_user(usr1)?;
+    let admin_addr = users.add_user(User::new(Some(cfg.admin_addr.clone()), tx_mp.clone()))?;
 
-    println!(
-        "user balance is {}",
-        usr_map.get_user(&addr1).unwrap().balance
-    );
+    users.set_admin(admin_addr.clone(), true);
 
-    usr_map.fund_user(&cfg.admin_addr, &addr1, 99999)?;
+    let usr1_addr = users.add_user(User::new(None, tx_mp))?;
+
+    users.fund_user(&admin_addr, &usr1_addr, 99999)?;
 
     println!(
-        "user balance is {}",
-        usr_map.get_user(&addr1).unwrap().balance
+        "User balance {}",
+        users.get_user(&usr1_addr).unwrap().get_balance()
     );
 
+    let mempool = node::Mempool::new(&admin_addr, rx_mp);
+    let mp_handle = task::spawn(async move{
+        mempool.
+    })
     Ok(())
 }

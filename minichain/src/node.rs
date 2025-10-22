@@ -1,5 +1,7 @@
 use crate::Config;
+use anyhow::Ok;
 use anyhow::{Result, bail, ensure};
+use jsonrpsee::client_transport::ws::Sender;
 use rand::{RngCore, rng};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -9,13 +11,15 @@ use std::collections::hash_map::Entry;
 use std::fmt::Write;
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc;
 
 type Address = String;
 type Hash = String;
 
 pub struct User {
-    pub address: Address,
-    pub balance: u128,
+    address: Address,
+    balance: u128,
+    tx_sender: mpsc::Sender<Transaction>,
 }
 pub struct UserMap {
     users: HashMap<Address, User>,
@@ -31,7 +35,7 @@ pub struct NodeManager {
     map: HashMap<SocketAddr, Node>,
 }
 
-struct Transaction {
+pub struct Transaction {
     id: Hash,
     gas: u128,
     data: Box<[u8]>,
@@ -51,18 +55,28 @@ pub struct Blockchain {
 pub struct Mempool {
     txs: BinaryHeap<Transaction>,
     miner: Address,
+    tx_rcv: mpsc::Receiver<Transaction>,
 }
 
 impl User {
-    pub fn new() -> Self {
-        let address = random_address();
+    pub fn new(addr: Option<Address>, tx_sender: mpsc::Sender<Transaction>) -> Self {
+        let address = addr.unwrap_or_else(|| random_address());
+
         User {
             address,
             balance: 0,
+            tx_sender,
         }
     }
 
-    fn send_tx<'a>(&mut self, data: Box<[u8]>, gas: u128, mempool: &'a mut Mempool) -> Result<()> {
+    pub fn get_address(&self) -> &Address {
+        &self.address
+    }
+    pub fn get_balance(&self) -> &u128 {
+        &self.balance
+    }
+
+    fn send_tx(&mut self, data: Box<[u8]>, gas: u128) -> Result<()> {
         ensure!(
             self.balance >= gas,
             "Sender doesn't have enough funds to pay for gas."
@@ -70,7 +84,7 @@ impl User {
 
         self.balance -= gas;
 
-        mempool.txs.push(Transaction {
+        self.tx_sender.send(Transaction {
             id: random_address(),
             gas,
             data,
@@ -80,37 +94,29 @@ impl User {
     }
 }
 
-impl UserMap {
-    pub fn new(admin_addr: &String) -> Self {
+impl<'a> UserMap {
+    pub fn new() -> Self {
         let users: HashMap<Address, User> = HashMap::new();
         let admins: HashSet<Address> = HashSet::new();
-
-        let admin = User {
-            address: admin_addr.clone(),
-            balance: 9999999,
-        };
-
-        let mut user_map = UserMap { users, admins };
-        user_map.add_user(admin).unwrap();
-        user_map.set_admin(admin_addr, true);
-        return user_map;
+        UserMap { users, admins }
     }
 
-    pub fn add_user(&mut self, usr: User) -> Result<()> {
+    pub fn add_user(&mut self, usr: User) -> Result<(String)> {
         match self.users.entry(usr.address.clone()) {
             Entry::Vacant(v) => {
+                let addr = usr.address.clone();
                 v.insert(usr);
-                Ok(())
+                Ok(addr)
             }
             Entry::Occupied(..) => bail!("User was already registered"),
         }
     }
 
-    fn set_admin(&mut self, addr: &Address, is_admin: bool) {
+    pub fn set_admin(&mut self, addr: Address, is_admin: bool) {
         if is_admin {
-            self.admins.insert(addr.clone());
+            self.admins.insert(addr);
         } else {
-            self.admins.remove(addr);
+            self.admins.remove(&addr);
         }
     }
 
@@ -120,31 +126,32 @@ impl UserMap {
     pub fn is_admin(&self, addr: &String) -> bool {
         self.admins.contains(addr)
     }
+
     pub fn fund_user(
         &mut self,
-        funder: &Address,
-        funded: &Address,
+        funder: &String,
+        funded: &String,
         amount: u128,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(self.is_admin(funder), "Funder is not an admin.");
-        if let Some(u) = self.users.get_mut(funded) {
-            u.balance += amount;
-            Ok(())
-        } else {
-            anyhow::bail!("Couldn't fund, because user was not registered.")
-        }
+        self.users.get_mut(funded).unwrap().balance += amount;
+        Ok(())
     }
 }
 
 impl Node {
-    fn new(owner_addr: &Address, ip_address: SocketAddr) -> Self {
+    fn new(owner_addr: Address, ip_address: SocketAddr) -> Self {
         Node {
-            owner_addr: owner_addr.clone(),
+            owner_addr: owner_addr,
             ip_address,
         }
     }
 
-    pub fn execute_txs(&self, mempool: &mut Mempool, chain: &mut Blockchain) -> anyhow::Result<()> {
+    pub async fn execute_txs(
+        &self,
+        mempool: &mut Mempool,
+        chain: &mut Blockchain,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.owner_addr == mempool.miner,
             "Current node was not elected to execute mempool txs."
@@ -165,7 +172,7 @@ impl Node {
 }
 impl NodeManager {
     pub fn new(cfg: &Config) -> Self {
-        let bootnode = Node::new(&cfg.admin_addr, cfg.boot_addr);
+        let bootnode = Node::new(cfg.admin_addr.clone(), cfg.boot_addr);
 
         let mut map: HashMap<SocketAddr, Node> = HashMap::new();
         map.insert(cfg.boot_addr, bootnode);
@@ -216,11 +223,22 @@ impl PartialOrd for Transaction {
     }
 }
 impl Mempool {
-    pub fn new(admin_addr: &Address) -> Self {
+    pub fn new(admin_addr: &Address, tx_rcv: mpsc::Receiver<Transaction>) -> Self {
         let mut txs: BinaryHeap<Transaction> = BinaryHeap::new();
         Mempool {
             txs,
             miner: admin_addr.clone(),
+            tx_rcv,
+        }
+    }
+
+    pub fn rcv_txs() {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tokio::select! {
+
+                Some(tx) =
+            }
         }
     }
 }
