@@ -1,7 +1,6 @@
 use crate::Config;
 use anyhow::Ok;
 use anyhow::{Result, bail, ensure};
-use jsonrpsee::client_transport::ws::Sender;
 use rand::{RngCore, rng};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -10,8 +9,11 @@ use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::fmt::Write;
 use std::net::SocketAddr;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use std::ops::AddAssign;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+use tokio::select;
+use tokio::sync::{Mutex, broadcast, mpsc};
 
 type Address = String;
 type Hash = String;
@@ -29,10 +31,11 @@ pub struct UserMap {
 pub struct Node {
     owner_addr: Address,
     ip_address: SocketAddr,
+    rx: broadcast::Receiver<Address>,
 }
 
 pub struct NodeManager {
-    map: HashMap<SocketAddr, Node>,
+    map: HashMap<SocketAddr, Arc<Mutex<Node>>>,
 }
 
 pub struct Transaction {
@@ -55,7 +58,8 @@ pub struct Blockchain {
 pub struct Mempool {
     txs: BinaryHeap<Transaction>,
     miner: Address,
-    tx_rcv: mpsc::Receiver<Transaction>,
+    rx: mpsc::Receiver<Transaction>,
+    tx: broadcast::Sender<Address>,
 }
 
 impl User {
@@ -101,7 +105,7 @@ impl<'a> UserMap {
         UserMap { users, admins }
     }
 
-    pub fn add_user(&mut self, usr: User) -> Result<(String)> {
+    pub fn add_user(&mut self, usr: User) -> Result<Address> {
         match self.users.entry(usr.address.clone()) {
             Entry::Vacant(v) => {
                 let addr = usr.address.clone();
@@ -140,10 +144,21 @@ impl<'a> UserMap {
 }
 
 impl Node {
-    fn new(owner_addr: Address, ip_address: SocketAddr) -> Self {
+    fn new(owner_addr: Address, ip_address: SocketAddr, rx: broadcast::Receiver<Address>) -> Self {
         Node {
             owner_addr: owner_addr,
             ip_address,
+            rx,
+        }
+    }
+
+    pub async fn wait_to_mine(&mut self) -> anyhow::Result<()> {
+        loop {
+            match self.rx.recv().await {
+                Result::Ok(n) if n == self.owner_addr => return Ok(()),
+                Result::Ok(_) => continue,
+                Err(e) => return Err(anyhow::anyhow!(e)),
+            }
         }
     }
 
@@ -170,9 +185,10 @@ impl Node {
         Ok(())
     }
 }
+
 impl NodeManager {
-    pub fn new(cfg: &Config) -> Self {
-        let bootnode = Node::new(cfg.admin_addr.clone(), cfg.boot_addr);
+    pub fn new(cfg: &Config, rx: broadcast::Receiver<Address>) -> Self {
+        let bootnode = Node::new(cfg.admin_addr.clone(), cfg.boot_addr, rx);
 
         let mut map: HashMap<SocketAddr, Node> = HashMap::new();
         map.insert(cfg.boot_addr, bootnode);
@@ -180,8 +196,8 @@ impl NodeManager {
         NodeManager { map: map }
     }
 
-    pub fn get_node(&self, ip: SocketAddr) -> Option<&Node> {
-        self.map.get(&ip)
+    pub fn get_node(&self, ip: SocketAddr) -> Option<Arc<Mutex<Node>>> {
+        self.map.get(&ip).cloned()
     }
 }
 
@@ -223,21 +239,29 @@ impl PartialOrd for Transaction {
     }
 }
 impl Mempool {
-    pub fn new(admin_addr: &Address, tx_rcv: mpsc::Receiver<Transaction>) -> Self {
+    pub fn new(
+        admin_addr: &Address,
+        rx: mpsc::Receiver<Transaction>,
+        tx: broadcast::Sender<Address>,
+    ) -> Self {
         let mut txs: BinaryHeap<Transaction> = BinaryHeap::new();
         Mempool {
             txs,
             miner: admin_addr.clone(),
-            tx_rcv,
+            rx,
+            tx,
         }
     }
 
-    pub fn rcv_txs() {
+    pub async fn rcv_txs(&mut self) {
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         loop {
             tokio::select! {
-
-                Some(tx) =
+                Some(tx) = self.rx.recv()  => {self.txs.push(tx)},
+              _ = tick.tick() => {
+                println!("Sending miner address");
+                    self.tx.send(self.miner.clone()).unwrap();
+                },
             }
         }
     }

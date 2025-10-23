@@ -2,7 +2,7 @@ mod node;
 
 use anyhow::anyhow;
 use std::{env, net::SocketAddr, sync::Arc};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::task;
 
 use crate::node::User;
@@ -37,9 +37,10 @@ pub fn load_config() -> Config {
 pub async fn run() -> anyhow::Result<()> {
     let cfg = load_config();
     let node_manager: node::NodeManager;
-    node_manager = node::NodeManager::new(&cfg);
-    let blockchain = node::Blockchain::new();
+    let chain = node::Blockchain::new();
     let (tx_mp, rx_mp) = mpsc::channel(cfg.mempool_buf);
+    let (tx_miner, rx_miner) = broadcast::channel(1);
+    node_manager = node::NodeManager::new(&cfg, rx_miner);
 
     let bootnode = node_manager
         .get_node(cfg.boot_addr)
@@ -62,9 +63,15 @@ pub async fn run() -> anyhow::Result<()> {
         users.get_user(&usr1_addr).unwrap().get_balance()
     );
 
-    let mempool = node::Mempool::new(&admin_addr, rx_mp);
-    let mp_handle = task::spawn(async move{
-        mempool.
-    })
+    let mut mempool = Arc::new(Mutex::new(node::Mempool::new(&admin_addr, rx_mp, tx_miner)));
+    let mut mplock = mempool.lock().await;
+    let mplock = task::spawn(mplock.rcv_txs());
+    let mplock2 = mempool.clone().lock().await;
+
+    let node_handle = tokio::spawn(async move {
+        let mut bootlock = bootnode.lock().await;
+        bootlock.wait_to_mine().await;
+        bootlock.execute_txs(mplock2, &mut chain);
+    });
     Ok(())
 }
