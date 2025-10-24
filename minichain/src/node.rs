@@ -1,5 +1,5 @@
 use crate::Config;
-use anyhow::Ok;
+use anyhow::{Ok, anyhow};
 use anyhow::{Result, bail, ensure};
 use rand::{RngCore, rng};
 use std::cmp::Ordering;
@@ -21,7 +21,7 @@ type Hash = String;
 pub struct User {
     address: Address,
     balance: u128,
-    tx_sender: mpsc::Sender<Transaction>,
+    tx_txn: mpsc::Sender<Transaction>,
 }
 pub struct UserMap {
     users: HashMap<Address, User>,
@@ -31,13 +31,14 @@ pub struct UserMap {
 pub struct Node {
     owner_addr: Address,
     ip_address: SocketAddr,
-    rx: broadcast::Receiver<Address>,
+    rx_miner: broadcast::Receiver<(Address, Vec<Transaction>)>,
 }
 
 pub struct NodeManager {
     map: HashMap<SocketAddr, Arc<Mutex<Node>>>,
 }
 
+#[derive(Clone)]
 pub struct Transaction {
     id: Hash,
     gas: u128,
@@ -45,7 +46,7 @@ pub struct Transaction {
     sender: Address,
 }
 
-struct Block {
+pub struct Block {
     number: u128,
     timestamp: SystemTime,
     txs: Vec<Transaction>,
@@ -58,8 +59,8 @@ pub struct Blockchain {
 pub struct Mempool {
     txs: BinaryHeap<Transaction>,
     miner: Address,
-    rx: mpsc::Receiver<Transaction>,
-    tx: broadcast::Sender<Address>,
+    rx_txn: mpsc::Receiver<Transaction>,
+    tx_mine: broadcast::Sender<(Address, Vec<Transaction>)>,
 }
 
 impl User {
@@ -69,7 +70,7 @@ impl User {
         User {
             address,
             balance: 0,
-            tx_sender,
+            tx_txn: tx_sender,
         }
     }
 
@@ -80,7 +81,7 @@ impl User {
         &self.balance
     }
 
-    fn send_tx(&mut self, data: Box<[u8]>, gas: u128) -> Result<()> {
+    async fn send_tx(&mut self, data: Box<[u8]>, gas: u128) -> Result<()> {
         ensure!(
             self.balance >= gas,
             "Sender doesn't have enough funds to pay for gas."
@@ -88,12 +89,14 @@ impl User {
 
         self.balance -= gas;
 
-        self.tx_sender.send(Transaction {
-            id: random_address(),
-            gas,
-            data,
-            sender: self.address.clone(),
-        });
+        self.tx_txn
+            .send(Transaction {
+                id: random_address(),
+                gas,
+                data,
+                sender: self.address.clone(),
+            })
+            .await?;
         Ok(())
     }
 }
@@ -144,53 +147,63 @@ impl<'a> UserMap {
 }
 
 impl Node {
-    fn new(owner_addr: Address, ip_address: SocketAddr, rx: broadcast::Receiver<Address>) -> Self {
+    fn new(
+        owner_addr: Address,
+        ip_address: SocketAddr,
+        rx_miner: broadcast::Receiver<(Address, Vec<Transaction>)>,
+    ) -> Self {
         Node {
             owner_addr: owner_addr,
             ip_address,
-            rx,
+            rx_miner,
         }
     }
 
-    pub async fn wait_to_mine(&mut self) -> anyhow::Result<()> {
+    pub async fn wait_to_mine(&mut self, chain: Arc<Mutex<Blockchain>>) -> anyhow::Result<()> {
         loop {
-            match self.rx.recv().await {
-                Result::Ok(n) if n == self.owner_addr => return Ok(()),
+            match self.rx_miner.recv().await {
+                Result::Ok(n) if n.0 == self.owner_addr => {
+                    self.execute_txs(chain, n.1).await?;
+                    break;
+                }
                 Result::Ok(_) => continue,
                 Err(e) => return Err(anyhow::anyhow!(e)),
             }
         }
+        bail!("Error waiting to mine...")
     }
 
     pub async fn execute_txs(
         &self,
-        mempool: &mut Mempool,
-        chain: &mut Blockchain,
+        chain: Arc<Mutex<Blockchain>>,
+        txs: Vec<Transaction>,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.owner_addr == mempool.miner,
-            "Current node was not elected to execute mempool txs."
-        );
+        let mut chain_lock = chain.lock().await;
 
         let mut b = Block {
-            number: chain.get_height(),
+            number: chain_lock.get_height(),
             timestamp: SystemTime::now(),
             txs: Vec::new(),
         };
 
-        while let Some(tx) = mempool.txs.pop() {
+        for tx in txs {
             b.txs.push(tx);
         }
 
+        chain_lock.blocks.push(b);
         Ok(())
     }
 }
 
 impl NodeManager {
-    pub fn new(cfg: &Config, rx: broadcast::Receiver<Address>) -> Self {
-        let bootnode = Node::new(cfg.admin_addr.clone(), cfg.boot_addr, rx);
+    pub fn new(cfg: &Config, rx_miner: broadcast::Receiver<(Address, Vec<Transaction>)>) -> Self {
+        let bootnode = Arc::new(Mutex::new(Node::new(
+            cfg.admin_addr.clone(),
+            cfg.boot_addr,
+            rx_miner,
+        )));
 
-        let mut map: HashMap<SocketAddr, Node> = HashMap::new();
+        let mut map: HashMap<SocketAddr, Arc<Mutex<Node>>> = HashMap::new();
         map.insert(cfg.boot_addr, bootnode);
 
         NodeManager { map: map }
@@ -241,15 +254,15 @@ impl PartialOrd for Transaction {
 impl Mempool {
     pub fn new(
         admin_addr: &Address,
-        rx: mpsc::Receiver<Transaction>,
-        tx: broadcast::Sender<Address>,
+        rx_txn: mpsc::Receiver<Transaction>,
+        tx_mine: broadcast::Sender<(Address, Vec<Transaction>)>,
     ) -> Self {
         let mut txs: BinaryHeap<Transaction> = BinaryHeap::new();
         Mempool {
             txs,
             miner: admin_addr.clone(),
-            rx,
-            tx,
+            rx_txn,
+            tx_mine,
         }
     }
 
@@ -257,10 +270,14 @@ impl Mempool {
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         loop {
             tokio::select! {
-                Some(tx) = self.rx.recv()  => {self.txs.push(tx)},
+                Some(tx) = self.rx_txn.recv()  => {self.txs.push(tx)},
               _ = tick.tick() => {
-                println!("Sending miner address");
-                    self.tx.send(self.miner.clone()).unwrap();
+                let mut txs : Vec<Transaction> = vec!();
+                println!("Sending miner address and txs");
+                while let Some(tx) = self.txs.pop(){
+                    txs.push(tx);
+                }
+                    self.tx_mine.send((self.miner.clone(),txs));
                 },
             }
         }

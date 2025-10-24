@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use std::{env, net::SocketAddr, sync::Arc};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::task;
+use tokio::task::JoinHandle;
 
 use crate::node::User;
 
@@ -36,11 +37,11 @@ pub fn load_config() -> Config {
 
 pub async fn run() -> anyhow::Result<()> {
     let cfg = load_config();
-    let node_manager: node::NodeManager;
-    let chain = node::Blockchain::new();
-    let (tx_mp, rx_mp) = mpsc::channel(cfg.mempool_buf);
+    let chain = Arc::new(Mutex::new(node::Blockchain::new()));
+    let (tx_txn, rx_txn) = mpsc::channel(cfg.mempool_buf);
     let (tx_miner, rx_miner) = broadcast::channel(1);
-    node_manager = node::NodeManager::new(&cfg, rx_miner);
+    let mut handles: Vec<JoinHandle<()>> = vec![];
+    let node_manager = node::NodeManager::new(&cfg, rx_miner);
 
     let bootnode = node_manager
         .get_node(cfg.boot_addr)
@@ -49,29 +50,36 @@ pub async fn run() -> anyhow::Result<()> {
     let map_mutex = Arc::new(Mutex::new(node::UserMap::new()));
 
     let mut users = map_mutex.lock().await;
-
-    let admin_addr = users.add_user(User::new(Some(cfg.admin_addr.clone()), tx_mp.clone()))?;
-
+    let admin_addr = users.add_user(User::new(Some(cfg.admin_addr.clone()), tx_txn.clone()))?;
     users.set_admin(admin_addr.clone(), true);
-
-    let usr1_addr = users.add_user(User::new(None, tx_mp))?;
-
+    let usr1_addr = users.add_user(User::new(None, tx_txn.clone()))?;
     users.fund_user(&admin_addr, &usr1_addr, 99999)?;
 
-    println!(
-        "User balance {}",
-        users.get_user(&usr1_addr).unwrap().get_balance()
-    );
+    let mempool = Arc::new(Mutex::new(node::Mempool::new(
+        &admin_addr,
+        rx_txn,
+        tx_miner,
+    )));
 
-    let mut mempool = Arc::new(Mutex::new(node::Mempool::new(&admin_addr, rx_mp, tx_miner)));
-    let mut mplock = mempool.lock().await;
-    let mplock = task::spawn(mplock.rcv_txs());
-    let mplock2 = mempool.clone().lock().await;
+    let mut mp_mutex = mempool.clone();
+    let mp_handle = task::spawn(async move {
+        mp_mutex.lock().await.rcv_txs();
+    });
+    handles.push(mp_handle);
+
+    let chain_mutex = chain.clone();
 
     let node_handle = tokio::spawn(async move {
         let mut bootlock = bootnode.lock().await;
-        bootlock.wait_to_mine().await;
-        bootlock.execute_txs(mplock2, &mut chain);
+        bootlock.wait_to_mine(chain_mutex).await;
     });
+
+    handles.push(node_handle);
+
+    for h in handles {
+        let result = h.await.unwrap();
+        println!("Task finished with: {:?}", result);
+    }
+
     Ok(())
 }
